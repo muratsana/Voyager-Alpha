@@ -8,6 +8,7 @@ class AdesDraftTests(unittest.TestCase):
     def test_renders_draft_warning_and_tracklet_rows(self):
         frame = FrameRecord(0, "a.fits", "2025-01-01T00:00:00", 2460676.5, 60, (50, 50), True)
         detection = Detection(0, 10, 20, 150.1, 22.2, 1000, 9, 3, 0.1)
+        detection.position_uncertainty_arcsec = 0.42
         tracklet = Tracklet("AH-00001", [detection], 1, 1.0, 1.2, 90.0, 0.1, 9.0, 0.5)
 
         psv = render_ades_psv_draft([tracklet], [frame], observatory_code="XXX")
@@ -16,8 +17,10 @@ class AdesDraftTests(unittest.TestCase):
         self.assertIn("AH-00001", psv)
         self.assertIn("DRAFT_NOT_MPC_READY", psv)
         self.assertIn("XXX", psv)
+        self.assertIn("2025-01-01T00:00:30Z", psv)
+        self.assertIn("|0.420|0.420|", psv)
+        self.assertIn("|60.000|DRAFT_NOT_MPC_READY", psv)
 
 
 if __name__ == "__main__":
     unittest.main()
-

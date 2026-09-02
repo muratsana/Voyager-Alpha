@@ -24,6 +24,8 @@ def link_tracklets(
     max_missing_gap_frames: int = 3,
     max_artifact_fraction: float = 0.5,
     strong_fit_rms_px: float = DOCUMENTED_DISCOVERY_METHOD.potential_discovery_rms_px,
+    min_motion_arcsec_min: float = 0.017,
+    max_motion_arcsec_min: float = 12.5,
 ) -> list[Tracklet]:
     """Link residual detections with time-aware constant-velocity hypotheses."""
 
@@ -32,8 +34,12 @@ def link_tracklets(
     times = _frame_times_minutes(frames)
     valid_indices = sorted(index for index in detections_by_frame if 0 <= index < len(frames))
     cadence = _median_cadence(times)
-    min_speed = float(min_motion_px_per_frame) / max(cadence, 1e-6)
-    max_speed = float(max_step_px) / max(cadence, 1e-6)
+    if pixel_scale_arcsec is not None and pixel_scale_arcsec > 0:
+        min_speed = max(0.0, float(min_motion_arcsec_min)) / pixel_scale_arcsec
+        max_speed = max(float(min_motion_arcsec_min), float(max_motion_arcsec_min)) / pixel_scale_arcsec
+    else:
+        min_speed = float(min_motion_px_per_frame) / max(cadence, 1e-6)
+        max_speed = float(max_step_px) / max(cadence, 1e-6)
     tracks_by_signature: dict[tuple[tuple[int, int, int], ...], list[Detection]] = {}
 
     for position, first_index in enumerate(valid_indices):
@@ -119,6 +125,8 @@ def link_tracklets(
             max_fit_rms_px=max_fit_rms_px,
         )
         classification = "unknown_candidate" if fit_rms <= strong_fit_rms_px else "review_candidate"
+        position_angle, angle_source = _position_angle(track, times, vx, vy)
+        reduced_chi2 = _reduced_chi2(track, times, (x0, y0, vx, vy, fit_rms))
         tracklets.append(
             Tracklet(
                 tracklet_id="",
@@ -126,7 +134,7 @@ def link_tracklets(
                 frames_detected=len(track),
                 motion_px_per_frame=float(motion_px_per_frame),
                 motion_arcsec_per_min=float(motion_arcsec) if motion_arcsec is not None else None,
-                position_angle_deg=float((math.degrees(math.atan2(vx, vy)) + 360.0) % 360.0),
+                position_angle_deg=position_angle,
                 fit_rms_px=float(fit_rms),
                 median_snr=median_snr,
                 confidence=confidence,
@@ -135,11 +143,15 @@ def link_tracklets(
                 arc_minutes=float(arc_minutes),
                 classification=classification,
                 artifact_flags=artifact_flags,
+                fit_rms_arcsec=float(fit_rms * pixel_scale_arcsec) if pixel_scale_arcsec else None,
+                reduced_chi2=reduced_chi2,
+                position_angle_source=angle_source,
+                speed_regime=_speed_regime(motion_arcsec),
             )
         )
     tracklets.sort(key=lambda item: (item.confidence, item.frames_detected, item.median_snr), reverse=True)
     for index, tracklet in enumerate(tracklets, start=1):
-        tracklet.tracklet_id = f"UH-{index:05d}"
+        tracklet.tracklet_id = f"VA-{index:05d}"
     return tracklets
 
 
@@ -213,8 +225,11 @@ def _fit_motion(track: list[Detection], times: np.ndarray) -> tuple[float, float
     design = np.column_stack((np.ones(len(relative)), relative))
     xs = np.asarray([d.x for d in ordered], dtype=np.float64)
     ys = np.asarray([d.y for d in ordered], dtype=np.float64)
-    x_fit = np.linalg.lstsq(design, xs, rcond=None)[0]
-    y_fit = np.linalg.lstsq(design, ys, rcond=None)[0]
+    sigmas = np.asarray([_centroid_sigma_px(detection) for detection in ordered], dtype=np.float64)
+    weights = 1.0 / np.square(sigmas)
+    weighted_design = design * np.sqrt(weights)[:, None]
+    x_fit = np.linalg.lstsq(weighted_design, xs * np.sqrt(weights), rcond=None)[0]
+    y_fit = np.linalg.lstsq(weighted_design, ys * np.sqrt(weights), rcond=None)[0]
     predicted_x = design @ x_fit
     predicted_y = design @ y_fit
     residuals = np.hypot(xs - predicted_x, ys - predicted_y)
@@ -313,18 +328,70 @@ def _confidence(
 
 
 def _frame_times_minutes(frames: list[FrameRecord]) -> np.ndarray:
-    values = []
-    valid_jd = [frame.midpoint_jd for frame in frames if frame.midpoint_jd is not None]
-    base = float(valid_jd[0]) if valid_jd else 0.0
-    for index, frame in enumerate(frames):
-        if frame.midpoint_jd is None:
-            values.append(float(index))
-        else:
-            values.append((float(frame.midpoint_jd) - base) * 1440.0)
+    if any(frame.midpoint_jd is None or not np.isfinite(frame.midpoint_jd) for frame in frames):
+        raise ValueError("Tracklet linking requires a valid exposure midpoint for every frame.")
+    base = float(frames[0].midpoint_jd)
+    values = [(float(frame.midpoint_jd) - base) * 1440.0 for frame in frames]
     result = np.asarray(values, dtype=np.float64)
     if len(result) > 1 and np.any(np.diff(result) <= 0):
-        result = np.arange(len(frames), dtype=np.float64)
+        raise ValueError("Tracklet linking requires strictly increasing exposure times.")
     return result
+
+
+def _centroid_sigma_px(detection: Detection) -> float:
+    if detection.snr <= 0 or detection.fwhm_px <= 0:
+        return 1.0
+    return max(0.05, float(detection.fwhm_px) / (2.355 * float(detection.snr)))
+
+
+def _reduced_chi2(
+    track: list[Detection],
+    times: np.ndarray,
+    fit: tuple[float, float, float, float, float],
+) -> float | None:
+    if len(track) <= 2:
+        return None
+    ordered = sorted(track, key=lambda item: item.frame_index)
+    x0, y0, vx, vy, _rms = fit
+    origin = times[ordered[0].frame_index]
+    chi2 = 0.0
+    for detection in ordered:
+        dt = times[detection.frame_index] - origin
+        residual = math.hypot(detection.x - (x0 + vx * dt), detection.y - (y0 + vy * dt))
+        chi2 += (residual / _centroid_sigma_px(detection)) ** 2
+    return float(chi2 / max(1, 2 * len(ordered) - 4))
+
+
+def _position_angle(
+    track: list[Detection],
+    times: np.ndarray,
+    fallback_vx: float,
+    fallback_vy: float,
+) -> tuple[float, str]:
+    ordered = sorted(track, key=lambda item: item.frame_index)
+    if len(ordered) >= 2 and all(item.ra is not None and item.dec is not None for item in ordered):
+        sample_times = np.asarray([times[item.frame_index] for item in ordered], dtype=np.float64)
+        relative = sample_times - sample_times[0]
+        design = np.column_stack((np.ones(len(relative)), relative))
+        ra = np.rad2deg(np.unwrap(np.deg2rad([float(item.ra) for item in ordered])))
+        dec = np.asarray([float(item.dec) for item in ordered], dtype=np.float64)
+        east = (ra - ra[0]) * math.cos(math.radians(float(np.mean(dec)))) * 3600.0
+        north = (dec - dec[0]) * 3600.0
+        east_rate = float(np.linalg.lstsq(design, east, rcond=None)[0][1])
+        north_rate = float(np.linalg.lstsq(design, north, rcond=None)[0][1])
+        if math.hypot(east_rate, north_rate) > 0:
+            return float((math.degrees(math.atan2(east_rate, north_rate)) + 360.0) % 360.0), "sky_wcs"
+    return float((math.degrees(math.atan2(fallback_vx, fallback_vy)) + 360.0) % 360.0), "pixel_grid"
+
+
+def _speed_regime(motion_arcsec_min: float | None) -> str:
+    if motion_arcsec_min is None:
+        return "pixel_only"
+    if motion_arcsec_min < 0.1:
+        return "very_slow"
+    if motion_arcsec_min <= 5.0:
+        return "nominal"
+    return "fast"
 
 
 def _median_cadence(times: np.ndarray) -> float:

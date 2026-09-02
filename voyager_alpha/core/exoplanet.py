@@ -255,6 +255,7 @@ def differential_light_curve_from_fluxes(
     target_uncertainties=None,
     comparison_uncertainties=None,
     detrend_order: int = 2,
+    time_system: str = "JD_UTC",
 ) -> LightCurveResult:
     times = np.asarray(times_jd, dtype=np.float64)
     target = np.asarray(target_values, dtype=np.float64)
@@ -291,7 +292,19 @@ def differential_light_curve_from_fluxes(
     if int(np.count_nonzero(valid)) < 5:
         raise ValueError("Geçerli diferansiyel fotometri ölçümü için yeterli kare yok.")
 
-    trend = _robust_polynomial_trend(times, raw_relative, relative_error, valid, detrend_order)
+    preliminary_flux = raw_relative / float(np.nanmedian(raw_relative[valid]))
+    preliminary_box = _search_single_transit(times, preliminary_flux, relative_error, valid)
+    excluded_from_trend = np.zeros(len(times), dtype=bool)
+    if preliminary_box["snr"] >= 3.0:
+        excluded_from_trend[np.asarray(preliminary_box["in_transit_indices"], dtype=int)] = True
+    trend = _robust_polynomial_trend(
+        times,
+        raw_relative,
+        relative_error,
+        valid,
+        detrend_order,
+        exclude=excluded_from_trend,
+    )
     relative = raw_relative / trend
     relative_error = relative_error / np.maximum(np.abs(trend), 1e-12)
     baseline = float(np.nanmedian(relative[valid]))
@@ -320,7 +333,10 @@ def differential_light_curve_from_fluxes(
         and detection_snr >= 5.0
         and (model_supported or box["snr"] >= 7.0)
     )
-    quality_flags = ["time_is_jd_utc_not_bjd_tdb", *comparison_flags]
+    normalized_time_system = str(time_system or "JD_UTC").upper()
+    quality_flags = list(comparison_flags)
+    if normalized_time_system != "BJD_TDB":
+        quality_flags.append("time_is_jd_utc_not_bjd_tdb")
     if not coverage_ok:
         quality_flags.append("incomplete_transit_baseline")
     if scatter > 0.02:
@@ -352,6 +368,7 @@ def differential_light_curve_from_fluxes(
         duration_minutes=float(box["duration_minutes"]),
         mid_transit_jd=float(box["midpoint_jd"]),
         model_fit=model_fit,
+        time_system=normalized_time_system,
     )
 
 
@@ -489,13 +506,14 @@ def _weighted_comparison_ensemble(comparisons, uncertainties):
     return ensemble, ensemble_error, weights, flags
 
 
-def _robust_polynomial_trend(times, flux, uncertainty, valid, order):
+def _robust_polynomial_trend(times, flux, uncertainty, valid, order, *, exclude=None):
     centered = (times - np.nanmedian(times[valid])) * 1440.0
     scale = max(float(np.ptp(centered[valid])) / 2.0, 1.0)
     x = centered / scale
-    keep = valid.copy()
-    threshold = float(np.nanpercentile(flux[valid], 30.0))
-    keep &= flux >= threshold
+    excluded = np.asarray(exclude if exclude is not None else np.zeros(len(flux), dtype=bool), dtype=bool)
+    keep = valid & ~excluded
+    if int(np.count_nonzero(keep)) < 4:
+        keep = valid.copy()
     requested_degree = 0 if int(np.count_nonzero(valid)) < 10 else int(order)
     degree = max(0, min(requested_degree, 2, int(np.count_nonzero(keep)) - 2))
     trend = np.full(len(flux), np.nanmedian(flux[valid]), dtype=np.float64)
@@ -507,7 +525,7 @@ def _robust_polynomial_trend(times, flux, uncertainty, valid, order):
         trend = np.polyval(coefficients, x)
         residual = flux - trend
         sigma = _robust_sigma(residual[keep])
-        keep = valid & (residual > -2.5 * sigma) & (residual < 4.0 * sigma)
+        keep = valid & ~excluded & (residual > -2.5 * sigma) & (residual < 4.0 * sigma)
     fallback = float(np.nanmedian(flux[valid]))
     return np.where(np.isfinite(trend) & (trend > 0), trend, fallback)
 
@@ -535,28 +553,39 @@ def _search_single_transit(times, flux, uncertainty, valid):
             snr = depth / max(depth_uncertainty, 1e-9)
             coverage_ok = start >= 2 and n - end >= 2
             score = snr * (1.0 if coverage_ok else 0.65)
-            if best is None or score > best["score"]:
+            baseline_balance = min(start, n - end)
+            better_score = best is None or score > best["score"] + 1e-9
+            better_tie = (
+                best is not None
+                and abs(score - best["score"]) <= 1e-9
+                and baseline_balance > best["baseline_balance"]
+            )
+            if better_score or better_tie:
                 cadence = float(np.nanmedian(np.diff(times[ordered]))) * 1440.0 if n > 1 else 0.0
                 duration = (times[ordered[end - 1]] - times[ordered[start]]) * 1440.0 + max(cadence, 0.0)
                 best = {
                     "score": float(score),
+                    "baseline_balance": int(baseline_balance),
                     "depth": float(depth),
                     "depth_uncertainty": depth_uncertainty,
                     "snr": float(snr),
                     "midpoint_jd": float(np.mean(times[ordered[inside]])),
                     "duration_minutes": float(max(duration, cadence)),
                     "in_transit_points": int(width),
+                    "in_transit_indices": [int(value) for value in ordered[inside]],
                     "coverage_ok": bool(coverage_ok),
                 }
     if best is None:
         return {
             "score": 0.0,
+            "baseline_balance": 0,
             "depth": 0.0,
             "depth_uncertainty": float("inf"),
             "snr": 0.0,
             "midpoint_jd": float(np.nanmedian(times[valid])),
             "duration_minutes": 0.0,
             "in_transit_points": 0,
+            "in_transit_indices": [],
             "coverage_ok": False,
         }
     return best

@@ -350,7 +350,10 @@ class ExoplanetWorkspace(QWidget):
             self.catalog_match_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.catalog_match_table.verticalHeader().setVisible(False)
         body.addWidget(self.catalog_match_table)
-        note = QLabel("Ephemeris BJD, kare zamanı JD_UTC olduğundan pencere karşılaştırması yaklaşık gösterilir.")
+        note = QLabel(
+            "WCS ve gözlemevi konumu varsa zaman BJD_TDB'ye çevrilir; "
+            "eksikse JD_UTC açık uyarıyla korunur."
+        )
         note.setObjectName("muted")
         note.setWordWrap(True)
         body.addWidget(note)
@@ -1135,7 +1138,18 @@ class ExoplanetWorkspace(QWidget):
             path += ".csv"
         with open(path, "w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["JD_UTC", "raw_relative_flux", "detrended_flux", "flux_uncertainty", "target_flux", "comparison_ensemble", "valid", "model_flux"])
+            writer.writerow(
+                [
+                    self.result.time_system,
+                    "raw_relative_flux",
+                    "detrended_flux",
+                    "flux_uncertainty",
+                    "target_flux",
+                    "comparison_ensemble",
+                    "valid",
+                    "model_flux",
+                ]
+            )
             model = self.result.model_fit.model_flux if self.result.model_fit else [float("nan")] * len(self.result.times_jd)
             writer.writerows(
                 zip(

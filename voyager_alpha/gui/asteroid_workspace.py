@@ -92,6 +92,8 @@ class AsteroidWorkspace(QWidget):
             "expected_fwhm_px": 3.0,
             "min_motion_px_per_frame": 1.5,
             "max_step_px": 35.0,
+            "min_motion_arcsec_min": 0.017,
+            "max_motion_arcsec_min": 12.5,
             "min_median_snr": 5.1,
             "max_fit_rms_px": 1.8,
             "strong_fit_rms_px": 0.9,
@@ -775,6 +777,8 @@ class AsteroidWorkspace(QWidget):
             expected_fwhm_px=settings.get("expected_fwhm_px"),
             min_motion_px_per_frame=settings.get("min_motion_px_per_frame", 0.7),
             max_step_px=settings.get("max_step_px", 35.0),
+            min_motion_arcsec_min=settings.get("min_motion_arcsec_min", 0.017),
+            max_motion_arcsec_min=settings.get("max_motion_arcsec_min", 12.5),
             min_median_snr=settings.get("min_median_snr", 4.5),
             max_fit_rms_px=settings.get("max_fit_rms_px", 1.8),
             strong_fit_rms_px=settings.get("strong_fit_rms_px", 0.9),
@@ -1484,6 +1488,10 @@ class DetectionSettingsDialog(QDialog):
         self.min_motion.setValidator(QDoubleValidator(0.05, 20.0, 3, self))
         self.max_step = QLineEdit(str(values.get("max_step_px", 35.0)))
         self.max_step.setValidator(QDoubleValidator(1.0, 200.0, 2, self))
+        self.min_motion_arcsec = QLineEdit(str(values.get("min_motion_arcsec_min", 0.017)))
+        self.min_motion_arcsec.setValidator(QDoubleValidator(0.001, 100.0, 3, self))
+        self.max_motion_arcsec = QLineEdit(str(values.get("max_motion_arcsec_min", 12.5)))
+        self.max_motion_arcsec.setValidator(QDoubleValidator(0.01, 500.0, 3, self))
         self.max_fit_rms = QLineEdit(str(values.get("max_fit_rms_px", 1.8)))
         self.max_fit_rms.setValidator(QDoubleValidator(0.3, 5.0, 2, self))
         self.track_occupancy = QLineEdit(str(values.get("min_track_occupancy", 0.58)))
@@ -1492,11 +1500,16 @@ class DetectionSettingsDialog(QDialog):
         form.addRow("Minimum source area (px)", self.min_pixels)
         form.addRow("Minimum linked frames", self.min_frames)
         form.addRow("Maximum residuals / frame", self.max_sources)
-        form.addRow("Minimum motion (px/frame)", self.min_motion)
-        form.addRow("Maximum step (px/frame)", self.max_step)
+        form.addRow("Minimum motion (arcsec/min)", self.min_motion_arcsec)
+        form.addRow("Maximum motion (arcsec/min)", self.max_motion_arcsec)
+        form.addRow("Fallback minimum (px/frame)", self.min_motion)
+        form.addRow("Fallback maximum (px/frame)", self.max_step)
         form.addRow("Maximum linear-fit RMS (px)", self.max_fit_rms)
         form.addRow("Minimum track occupancy (0-1)", self.track_occupancy)
-        note = QLabel("Dokümante başlangıç: hybrid detector, 5 sigma, FWHM 3 px, en fazla 24 residual, en az 3 kare, 1.5 px seed hareketi ve 2.8 px yeniden eşleme.")
+        note = QLabel(
+            "WCS/plate scale varsa arcsec/min sınırları kullanılır. Piksel/kare sınırları "
+            "yalnızca ölçek belirlenemediğinde devreye girer."
+        )
         note.setWordWrap(True)
         note.setObjectName("muted")
         form.addRow(note)
@@ -1514,6 +1527,11 @@ class DetectionSettingsDialog(QDialog):
             "max_sources": int(self.max_sources.text()),
             "min_motion_px_per_frame": float(self.min_motion.text()),
             "max_step_px": float(self.max_step.text()),
+            "min_motion_arcsec_min": float(self.min_motion_arcsec.text()),
+            "max_motion_arcsec_min": max(
+                float(self.min_motion_arcsec.text()),
+                float(self.max_motion_arcsec.text()),
+            ),
             "max_fit_rms_px": float(self.max_fit_rms.text()),
             "strong_fit_rms_px": min(float(self.max_fit_rms.text()) * 0.62, float(self.max_fit_rms.text())),
             "min_track_occupancy": float(self.track_occupancy.text()),

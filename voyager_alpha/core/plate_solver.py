@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from astropy.io import fits
@@ -25,6 +25,10 @@ class PlateSolveResult:
     return_code: int | None = None
     header: fits.Header | None = None
     wcs_path: str | None = None
+    solution_status: str = ""
+    warning: str = ""
+    log_path: str | None = None
+    command: list[str] = field(default_factory=list)
 
 
 class AstapPlateSolver:
@@ -35,10 +39,12 @@ class AstapPlateSolver:
         executable: str | None = None,
         timeout_seconds: int = 180,
         search_radius_deg: float = 30.0,
+        downsample: int = 0,
     ):
         self.executable = executable or _discover_astap()
         self.timeout_seconds = int(timeout_seconds)
         self.search_radius_deg = float(search_radius_deg)
+        self.downsample = max(0, int(downsample))
 
     def is_available(self) -> bool:
         return bool(self.executable and Path(self.executable).is_file())
@@ -67,6 +73,11 @@ class AstapPlateSolver:
                 str(working),
                 "-r",
                 f"{self.search_radius_deg:g}",
+                "-z",
+                str(self.downsample),
+                "-wcs",
+                "-update",
+                "-log",
             ]
             if fov_deg is not None:
                 command.extend(["-fov", f"{float(fov_deg):.8g}"])
@@ -82,18 +93,25 @@ class AstapPlateSolver:
                     text=True,
                     timeout=self.timeout_seconds,
                     check=False,
+                    cwd=temp_dir,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except subprocess.TimeoutExpired:
-                return PlateSolveResult(False, message="ASTAP solve timed out.")
+                return PlateSolveResult(False, message="ASTAP solve timed out.", command=command)
             except OSError as exc:
-                return PlateSolveResult(False, message=str(exc))
+                return PlateSolveResult(False, message=str(exc), command=command)
 
             output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
             header, wcs_file = _read_astap_solution(working)
-            success = completed.returncode == 0 and header is not None and _header_has_wcs(header)
+            status, warning, log_file = _read_astap_status(working, Path(temp_dir))
+            success = (
+                completed.returncode == 0
+                and header is not None
+                and _header_has_wcs(header)
+                and status.upper() != "F"
+            )
             if not success and not output:
-                output = "ASTAP did not produce a usable .wcs solution."
+                output = warning or "ASTAP did not produce a usable .wcs solution."
             return PlateSolveResult(
                 success=success,
                 solved_file=str(source),
@@ -101,6 +119,10 @@ class AstapPlateSolver:
                 return_code=completed.returncode,
                 header=header,
                 wcs_path=str(wcs_file) if wcs_file else None,
+                solution_status=status,
+                warning=warning,
+                log_path=str(log_file) if log_file else None,
+                command=command,
             )
 
 
@@ -140,6 +162,30 @@ def _read_astap_solution(working: Path) -> tuple[fits.Header | None, Path | None
     except Exception:
         pass
     return None, None
+
+
+def _read_astap_status(working: Path, temp_dir: Path) -> tuple[str, str, Path | None]:
+    values: dict[str, str] = {}
+    ini_candidates = (working.with_suffix(".ini"), Path(str(working) + ".ini"), temp_dir / "astap.ini")
+    for candidate in ini_candidates:
+        if not candidate.is_file():
+            continue
+        for raw_line in candidate.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if "=" not in raw_line:
+                continue
+            key, value = raw_line.split("=", 1)
+            values[key.strip().upper()] = value.strip().strip("'\"")
+        if values:
+            break
+
+    log_candidates = (working.with_suffix(".log"), Path(str(working) + ".log"), temp_dir / "astap.log")
+    log_file = next((candidate for candidate in log_candidates if candidate.is_file()), None)
+    warning = values.get("WARNING", "")
+    if not warning and log_file is not None:
+        log_text = log_file.read_text(encoding="utf-8", errors="ignore")
+        warning_line = next((line.strip() for line in log_text.splitlines() if "warning" in line.lower()), "")
+        warning = warning_line
+    return values.get("PLTSOLVD", ""), warning, log_file
 
 
 def _header_has_wcs(header: fits.Header) -> bool:

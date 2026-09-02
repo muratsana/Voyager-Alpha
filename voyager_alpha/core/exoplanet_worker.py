@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 
 import numpy as np
+from astropy import units as u
+from astropy.coordinates import EarthLocation
+from astropy.time import Time
+from astropy.wcs import WCS
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .calibration import calibrate_science_frame, load_master_dark, load_master_frame
@@ -10,10 +14,11 @@ from .exoplanet_catalog import ExoplanetCatalog
 from .exoplanet import aperture_measurement, differential_light_curve_from_fluxes
 from .exoplanet_quality import merge_detector_quality, run_photometry_preflight, sensor_coordinates
 from .models import RegistrationSolution
-from .fits_io import read_fits_image
+from .fits_io import read_fits_header, read_fits_image
 from .metadata import inspect_sequence
 from .plate_solver import AstapPlateSolver
 from .registration import register_frame
+from .timeframe import observatory_location_from_header, observing_geometry
 from .wcs_cache import SequenceWcsResult, WcsSolutionCache, propagate_wcs_header
 
 
@@ -238,6 +243,13 @@ class ExoplanetWorker(QThread):
             records.sort(key=lambda record: record.midpoint_jd or 0.0)
             files = [record.file_path for record in records]
             total = len(files)
+            bjd_ready = _populate_barycentric_times(records, self.target_xy)
+            if bjd_ready:
+                self.log.emit("INFO|Time|BJD_TDB and airmass calculated from selected target and observatory location")
+            else:
+                self.log.emit(
+                    "WARN|Time|BJD_TDB unavailable; WCS and FITS observatory latitude/longitude/elevation are required"
+                )
 
             bias = load_master_frame(self.master_paths["bias"]) if self.master_paths.get("bias") else None
             flat = load_master_frame(self.master_paths["flat"]) if self.master_paths.get("flat") else None
@@ -282,14 +294,14 @@ class ExoplanetWorker(QThread):
                         f"{level}|Align|Frame {index + 1}: {solution.method}, "
                         f"RMS {solution.rms_px:.2f} px, {solution.matched_stars} stars"
                     )
+                target_sensor_xy = sensor_coordinates(self.target_xy, solution)
                 target = aperture_measurement(
-                    aligned,
-                    *self.target_xy,
+                    data,
+                    *target_sensor_xy,
                     aperture_radius=self.aperture_radius,
                     recenter=self.recenter,
                     gain_e_per_adu=_usable_gain(record),
                 )
-                target_sensor_xy = sensor_coordinates(self.target_xy, solution)
                 target = merge_detector_quality(
                     target,
                     aperture_measurement(
@@ -303,8 +315,8 @@ class ExoplanetWorker(QThread):
                 comparisons = [
                     merge_detector_quality(
                         aperture_measurement(
-                            aligned,
-                            *xy,
+                            data,
+                            *sensor_coordinates(xy, solution),
                             aperture_radius=self.aperture_radius,
                             recenter=self.recenter,
                             gain_e_per_adu=_usable_gain(record),
@@ -332,7 +344,7 @@ class ExoplanetWorker(QThread):
                 measurement_flags.update(target.flags)
                 for value in comparisons:
                     measurement_flags.update(value.flags)
-                centroid_offsets.append(float(np.hypot(target.x - self.target_xy[0], target.y - self.target_xy[1])))
+                centroid_offsets.append(float(np.hypot(target.x - target_sensor_xy[0], target.y - target_sensor_xy[1])))
                 comparison_sum = float(np.nansum([value.flux for value in comparisons]))
                 self.measurement_ready.emit(index, float(target.flux), comparison_sum)
                 self.progress.emit(8 + int(((index + 1) / total) * 82), "Photometry in progress")
@@ -346,13 +358,15 @@ class ExoplanetWorker(QThread):
                     + ("..." if len(saturated_target_frames) > 12 else "")
                 )
             self.progress.emit(94, "Differential light curve is being calculated")
+            time_system = "BJD_TDB" if bjd_ready else "JD_UTC"
             result = differential_light_curve_from_fluxes(
-                [record.midpoint_jd for record in records],
+                [record.bjd_tdb if bjd_ready else record.midpoint_jd for record in records],
                 target_values,
                 comparison_values,
                 target_uncertainties=target_uncertainties,
                 comparison_uncertainties=comparison_uncertainties,
                 detrend_order=self.detrend_order,
+                time_system=time_system,
             )
             result.quality_flags.extend(sorted(measurement_flags))
             if centroid_offsets:
@@ -380,3 +394,54 @@ def _usable_gain(record):
     if record.camera.gain_keyword == "EGAIN" or gain <= 10.0:
         return float(gain)
     return None
+
+
+def _populate_barycentric_times(records, target_xy) -> bool:
+    if not records or any(record.midpoint_jd is None for record in records):
+        return False
+    reference_header = None
+    try:
+        reference_header, _method = WcsSolutionCache().resolve(records[0].file_path)
+    except Exception:
+        reference_header = None
+    if reference_header is None:
+        try:
+            reference_header = read_fits_header(records[0].file_path)
+        except Exception:
+            return False
+    try:
+        wcs = WCS(reference_header).celestial
+        if not wcs.has_celestial:
+            return False
+        target = wcs.pixel_to_world(float(target_xy[0]), float(target_xy[1]))
+    except Exception:
+        return False
+
+    for record in records:
+        try:
+            header = read_fits_header(record.file_path)
+            location = observatory_location_from_header(header)
+            if location is None and None not in (
+                record.site_longitude_deg,
+                record.site_latitude_deg,
+                record.site_elevation_m,
+            ):
+                location = EarthLocation.from_geodetic(
+                    float(record.site_longitude_deg) * u.deg,
+                    float(record.site_latitude_deg) * u.deg,
+                    float(record.site_elevation_m) * u.m,
+                )
+            geometry = observing_geometry(
+                Time(float(record.midpoint_jd), format="jd", scale="utc"),
+                target,
+                location,
+            )
+        except Exception:
+            return False
+        if geometry.bjd_tdb is None:
+            return False
+        record.bjd_tdb = geometry.bjd_tdb
+        record.airmass = geometry.airmass
+        record.altitude_deg = geometry.altitude_deg
+        record.sun_altitude_deg = geometry.sun_altitude_deg
+    return True

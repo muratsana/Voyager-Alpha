@@ -1,10 +1,10 @@
 from astropy.io import fits
-from astropy.time import Time
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 
 from .fits_io import read_fits_header
 from .models import CameraMetadata, FrameRecord
+from .timeframe import observatory_location_from_header, observing_geometry, parse_frame_time, target_coord_from_header
 
 
 EXPOSURE_KEYS = ("EXPTIME", "EXPOSURE", "EXP_TIME")
@@ -32,17 +32,6 @@ def _read_exposure(header) -> float | None:
             except (TypeError, ValueError):
                 return None
     return None
-
-
-def _midpoint_jd(date_obs: str | None, exposure_seconds: float | None) -> float | None:
-    if not date_obs:
-        return None
-    try:
-        start = Time(date_obs, format="fits")
-        offset_days = (exposure_seconds or 0.0) / 2.0 / 86400.0
-        return float(start.jd + offset_days)
-    except Exception:
-        return None
 
 
 def _first_text(header, keys) -> str | None:
@@ -127,6 +116,10 @@ def read_camera_metadata(header) -> CameraMetadata:
     focal_length, _focal_keyword = _first_float(header, FOCAL_LENGTH_KEYS)
     aperture, _aperture_keyword = _first_float(header, APERTURE_KEYS)
     image_scale, scale_source = _image_scale(header, pixel_x, bin_x, focal_length)
+    read_noise, _read_noise_key = _first_float(header, ("RDNOISE", "READNOIS", "READNOISE"))
+    dark_current, _dark_current_key = _first_float(header, ("DARKCUR", "DARKCURRENT"))
+    saturation, _saturation_key = _first_float(header, ("SATURATE", "SATLEVEL", "MAXADU"))
+    full_well, _full_well_key = _first_float(header, ("FULLWELL", "FWELL"))
     return CameraMetadata(
         instrument=_first_text(header, CAMERA_KEYS),
         detector=_first_text(header, DETECTOR_KEYS),
@@ -146,6 +139,10 @@ def read_camera_metadata(header) -> CameraMetadata:
         image_scale_source=scale_source,
         readout_mode=_first_text(header, ("READOUTM", "READMODE", "READOUT")),
         bayer_pattern=_first_text(header, ("BAYERPAT", "BAYERPATTERN")),
+        read_noise_e=read_noise,
+        dark_current_e_s=dark_current,
+        saturation_adu=saturation,
+        full_well_e=full_well,
     )
 
 
@@ -157,13 +154,15 @@ def inspect_frame(index: int, file_path: str) -> FrameRecord:
 
     date_obs = header.get("DATE-OBS")
     exposure_seconds = _read_exposure(header)
-    midpoint_jd = _midpoint_jd(date_obs, exposure_seconds)
+    time_info = parse_frame_time(header, exposure_seconds)
+    midpoint_jd = time_info.jd_utc
+    location = observatory_location_from_header(header)
+    geometry = observing_geometry(time_info.midpoint, target_coord_from_header(header), location)
 
     quality_flags = []
     if not date_obs:
         quality_flags.append("missing_DATE-OBS")
-    if midpoint_jd is None:
-        quality_flags.append("invalid_time")
+    quality_flags.extend(flag for flag in time_info.flags if flag not in quality_flags)
     if exposure_seconds is None:
         quality_flags.append("missing_exposure")
 
@@ -175,6 +174,13 @@ def inspect_frame(index: int, file_path: str) -> FrameRecord:
     if not has_wcs:
         quality_flags.append("missing_or_invalid_WCS")
 
+    site_latitude = site_longitude = site_elevation = None
+    if location is not None:
+        longitude, latitude, height = location.to_geodetic()
+        site_latitude = float(latitude.deg)
+        site_longitude = float(longitude.deg)
+        site_elevation = float(height.to_value("m"))
+
     return FrameRecord(
         index=index,
         file_path=file_path,
@@ -185,6 +191,16 @@ def inspect_frame(index: int, file_path: str) -> FrameRecord:
         has_wcs=has_wcs,
         quality_flags=quality_flags,
         camera=read_camera_metadata(header),
+        midpoint_utc=time_info.midpoint_utc,
+        time_source=time_info.source,
+        time_scale=time_info.declared_scale,
+        bjd_tdb=time_info.header_bjd_tdb or geometry.bjd_tdb,
+        airmass=geometry.airmass,
+        altitude_deg=geometry.altitude_deg,
+        sun_altitude_deg=geometry.sun_altitude_deg,
+        site_latitude_deg=site_latitude,
+        site_longitude_deg=site_longitude,
+        site_elevation_m=site_elevation,
     )
 
 
@@ -197,6 +213,12 @@ def inspect_sequence(fits_files: list[str]) -> list[FrameRecord]:
         frames = sorted(frames, key=lambda frame: frame.midpoint_jd or 0.0)
         for index, frame in enumerate(frames):
             frame.index = index
+        if len(frames) > 1 and any(
+            (frames[index].midpoint_jd or 0.0) <= (frames[index - 1].midpoint_jd or 0.0)
+            for index in range(1, len(frames))
+        ):
+            for frame in frames:
+                frame.quality_flags.append("invalid_time_order")
 
     first_shape = frames[0].shape
     for frame in frames:

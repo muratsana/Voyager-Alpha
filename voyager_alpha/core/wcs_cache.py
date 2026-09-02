@@ -68,7 +68,7 @@ class WcsSolutionCache:
 def default_wcs_cache_directory() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     root = Path(local) if local else Path.home() / ".voyager-alpha"
-    return root / "Astrohub" / "SkySearch" / "wcs"
+    return root / "Astrohub" / "VoyagerAlpha" / "wcs"
 
 
 def has_celestial_wcs(header: fits.Header | None) -> bool:

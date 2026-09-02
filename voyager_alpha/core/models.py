@@ -24,6 +24,10 @@ class CameraMetadata:
     image_scale_source: Optional[str] = None
     readout_mode: Optional[str] = None
     bayer_pattern: Optional[str] = None
+    read_noise_e: Optional[float] = None
+    dark_current_e_s: Optional[float] = None
+    saturation_adu: Optional[float] = None
+    full_well_e: Optional[float] = None
 
 
 @dataclass
@@ -46,6 +50,16 @@ class FrameRecord:
     fwhm_px: Optional[float] = None
     calibration_state: str = "uncalibrated"
     camera: CameraMetadata = field(default_factory=CameraMetadata)
+    midpoint_utc: Optional[str] = None
+    time_source: Optional[str] = None
+    time_scale: str = "UTC"
+    bjd_tdb: Optional[float] = None
+    airmass: Optional[float] = None
+    altitude_deg: Optional[float] = None
+    sun_altitude_deg: Optional[float] = None
+    site_latitude_deg: Optional[float] = None
+    site_longitude_deg: Optional[float] = None
+    site_elevation_m: Optional[float] = None
 
 
 @dataclass
@@ -65,6 +79,7 @@ class Detection:
     flags: list[str] = field(default_factory=list)
     sensor_x: Optional[float] = None
     sensor_y: Optional[float] = None
+    position_uncertainty_arcsec: Optional[float] = None
 
     def to_overlay(self, is_known: bool = False, match: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         return {
@@ -103,6 +118,10 @@ class Tracklet:
     known_match: Optional[dict[str, Any]] = None
     review_status: str = "unreviewed"
     reviewer_notes: str = ""
+    fit_rms_arcsec: Optional[float] = None
+    reduced_chi2: Optional[float] = None
+    position_angle_source: str = "pixel_grid"
+    speed_regime: str = ""
 
     @property
     def first_frame(self) -> int:
@@ -122,6 +141,8 @@ class Tracklet:
             "motion_arcsec_per_min": self.motion_arcsec_per_min,
             "position_angle_deg": self.position_angle_deg,
             "fit_rms_px": self.fit_rms_px,
+            "fit_rms_arcsec": self.fit_rms_arcsec,
+            "reduced_chi2": self.reduced_chi2,
             "median_snr": self.median_snr,
             "confidence": self.confidence,
             "velocity_x_px_min": self.velocity_x_px_min,
@@ -131,6 +152,8 @@ class Tracklet:
             "artifact_flags": list(self.artifact_flags),
             "known_match": self.known_match,
             "review_status": self.review_status,
+            "position_angle_source": self.position_angle_source,
+            "speed_regime": self.speed_regime,
         }
 
 

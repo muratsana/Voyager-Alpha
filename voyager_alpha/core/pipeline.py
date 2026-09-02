@@ -27,7 +27,7 @@ from .known_objects import (
     prediction_status,
 )
 from .metadata import inspect_sequence
-from .models import RegistrationSolution, SequenceResult
+from .models import Detection, RegistrationSolution, SequenceResult
 from .plate_solver import AstapPlateSolver, merge_wcs_header
 from .registration import register_frame, warp_affine
 from .tracklet import link_tracklets
@@ -72,6 +72,8 @@ class AsteroidWorker(QThread):
         max_artifact_fraction=0.5,
         persistence_fraction=0.12,
         estimate_gaia_depth=True,
+        min_motion_arcsec_min=0.017,
+        max_motion_arcsec_min=12.5,
     ):
         super().__init__()
         self.fits_files = list(fits_files)
@@ -98,6 +100,8 @@ class AsteroidWorker(QThread):
         self.max_artifact_fraction = float(np.clip(max_artifact_fraction, 0.0, 1.0))
         self.persistence_fraction = float(np.clip(persistence_fraction, 0.05, 0.8))
         self.estimate_gaia_depth = bool(estimate_gaia_depth)
+        self.min_motion_arcsec_min = max(0.001, float(min_motion_arcsec_min))
+        self.max_motion_arcsec_min = max(self.min_motion_arcsec_min, float(max_motion_arcsec_min))
         self.is_running = True
 
     def run(self):
@@ -125,7 +129,7 @@ class AsteroidWorker(QThread):
             flag
             for frame in frames
             for flag in frame.quality_flags
-            if flag in {"invalid_time", "shape_mismatch"}
+            if flag in {"invalid_time", "invalid_time_order", "shape_mismatch"}
         }
         if blocking:
             raise ValueError(f"Engelleyici sekans hatası: {', '.join(sorted(blocking))}")
@@ -180,6 +184,7 @@ class AsteroidWorker(QThread):
             self.log.emit("WARN|Generate|WCS olmadığı için bilinen cisim tahmini üretilemedi")
         else:
             matcher = None
+        reference_pixel_scale = estimate_pixel_scale_arcsec(reference_header) if has_reference_wcs else None
 
         self._stage("reference", "Align: tüm kareler ortak piksel ızgarasına getiriliyor", 18)
         registration_solutions: dict[int, RegistrationSolution] = {
@@ -187,7 +192,7 @@ class AsteroidWorker(QThread):
         }
         detections_by_frame = {}
         reliable_registration_positions: set[int] = set()
-        with tempfile.TemporaryDirectory(prefix="astrohub-discover-") as cache_dir:
+        with tempfile.TemporaryDirectory(prefix="voyager-alpha-discover-") as cache_dir:
             cache_path = Path(cache_dir) / "aligned.float32"
             aligned_stack = np.memmap(
                 cache_path,
@@ -271,6 +276,12 @@ class AsteroidWorker(QThread):
                         detection.y,
                         solution,
                     )
+                    _assign_detection_astrometry(
+                        detection,
+                        frame,
+                        solution,
+                        reference_pixel_scale,
+                    )
                 frame.background_median, frame.background_rms = robust_location_scale(aligned)
                 detections_by_frame[frame_index] = detections
                 preview = _preview_image(residual)
@@ -303,7 +314,7 @@ class AsteroidWorker(QThread):
             f"{filtered_detection_count} tek-kare residual bağlantı aşamasına geçti"
         )
         self._stage("link", "Zaman tabanlı tracklet modeli kuruluyor", 78)
-        pixel_scale = estimate_pixel_scale_arcsec(reference_header) if has_reference_wcs else None
+        pixel_scale = reference_pixel_scale
         tracklets = link_tracklets(
             detections_by_frame,
             frames,
@@ -318,6 +329,8 @@ class AsteroidWorker(QThread):
             max_missing_gap_frames=self.max_missing_gap_frames,
             max_artifact_fraction=self.max_artifact_fraction,
             pixel_scale_arcsec=pixel_scale,
+            min_motion_arcsec_min=self.min_motion_arcsec_min,
+            max_motion_arcsec_min=self.max_motion_arcsec_min,
         )
 
         if matcher is not None:
@@ -408,13 +421,15 @@ class AsteroidWorker(QThread):
             return header
         if not self.auto_plate_solve:
             return header
-        solver = AstapPlateSolver()
+        solver = AstapPlateSolver(downsample=2)
         if not solver.is_available():
             self.log.emit("WARN|Astrometry|ASTAP bulunamadı")
             return header
         self.log.emit(f"INFO|Astrometry|ASTAP referans çözümü başladı: {Path(frame.file_path).name}")
-        result = solver.solve(frame.file_path, fov_deg=0.0)
+        result = solver.solve(frame.file_path, fov_deg=_frame_fov_deg(frame))
         if result.success and result.header is not None:
+            if result.warning:
+                self.log.emit(f"WARN|Astrometry|ASTAP: {result.warning[:300]}")
             return merge_wcs_header(header, result.header)
         self.log.emit(f"WARN|Astrometry|ASTAP çözümü başarısız: {result.message[:300]}")
         return header
@@ -448,6 +463,39 @@ def _aligned_to_sensor_xy(x: float, y: float, solution: RegistrationSolution) ->
     except (ValueError, np.linalg.LinAlgError):
         pass
     return float(x), float(y)
+
+
+def _assign_detection_astrometry(
+    detection: Detection,
+    frame,
+    solution: RegistrationSolution,
+    reference_pixel_scale: float | None,
+) -> None:
+    used_frame_wcs = False
+    if detection.sensor_x is not None and detection.sensor_y is not None:
+        try:
+            frame_header = read_fits_header(frame.file_path)
+            frame_wcs = WCS(frame_header).celestial
+            if frame_wcs.has_celestial:
+                ra, dec = frame_wcs.all_pix2world(detection.sensor_x, detection.sensor_y, 0)
+                detection.ra = float(ra)
+                detection.dec = float(dec)
+                used_frame_wcs = True
+        except Exception:
+            used_frame_wcs = False
+    if detection.ra is not None and detection.dec is not None and not used_frame_wcs:
+        detection.flags.append("propagated_reference_wcs")
+
+    if reference_pixel_scale is None or reference_pixel_scale <= 0:
+        return
+    centroid_sigma_px = max(
+        0.05,
+        float(detection.fwhm_px) / (2.355 * max(float(detection.snr), 1e-6)),
+    )
+    registration_sigma_px = 0.0 if used_frame_wcs else max(0.0, float(solution.rms_px))
+    detection.position_uncertainty_arcsec = float(
+        np.hypot(centroid_sigma_px, registration_sigma_px) * reference_pixel_scale
+    )
 
 
 def materialize_sequence_frame(
@@ -523,3 +571,10 @@ def _has_celestial_wcs(header) -> bool:
         return bool(WCS(header).has_celestial)
     except Exception:
         return False
+
+
+def _frame_fov_deg(frame) -> float | None:
+    scale = frame.camera.image_scale_arcsec_px
+    if scale is None or scale <= 0 or not frame.shape:
+        return None
+    return float(frame.shape[0] * scale / 3600.0)

@@ -1,9 +1,11 @@
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from astropy.io import fits
+from astropy.wcs import WCS
 
 from voyager_alpha.core.exoplanet import (
     aperture_measurement,
@@ -12,6 +14,7 @@ from voyager_alpha.core.exoplanet import (
     fit_limb_darkened_transit,
 )
 from voyager_alpha.core.exoplanet_worker import ExoplanetWorker
+from voyager_alpha.core.models import RegistrationSolution
 
 
 class ExoplanetTests(unittest.TestCase):
@@ -52,6 +55,64 @@ class ExoplanetTests(unittest.TestCase):
 
             self.assertEqual(len(results), 1)
             self.assertTrue(results[0].transit_candidate)
+
+    def test_streaming_worker_measures_unwarped_calibrated_frames(self):
+        with tempfile.TemporaryDirectory() as folder:
+            files = []
+            for index, scale in enumerate([1.0] * 5 + [0.94] * 5 + [1.0] * 5):
+                image = np.full((80, 80), 100.0, dtype=np.float32)
+                self._add_star(image, 30, 40, 6000.0 * scale)
+                self._add_star(image, 55, 35, 5000.0)
+                path = Path(folder) / f"unwarped_{index:02d}.fits"
+                hdu = fits.PrimaryHDU(image)
+                hdu.header["DATE-OBS"] = f"2026-09-01T20:{index:02d}:00"
+                hdu.header["EXPTIME"] = 60.0
+                hdu.writeto(path)
+                files.append(str(path))
+
+            results = []
+            worker = ExoplanetWorker(files, (30, 40), [(55, 35)], aperture_radius=5.0)
+            worker.result_ready.connect(results.append)
+            blank_aligned = np.zeros((80, 80), dtype=np.float32)
+            with patch(
+                "voyager_alpha.core.exoplanet_worker.register_frame",
+                return_value=(blank_aligned, RegistrationSolution.identity()),
+            ):
+                worker.run()
+
+            self.assertEqual(len(results), 1)
+            self.assertTrue(results[0].transit_candidate)
+
+    def test_streaming_worker_uses_bjd_tdb_with_wcs_and_site(self):
+        with tempfile.TemporaryDirectory() as folder:
+            files = []
+            wcs = WCS(naxis=2)
+            wcs.wcs.crpix = [40.0, 40.0]
+            wcs.wcs.cdelt = [-0.0005, 0.0005]
+            wcs.wcs.crval = [120.0, 22.0]
+            wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+            for index in range(8):
+                image = np.full((80, 80), 100.0, dtype=np.float32)
+                self._add_star(image, 30, 40, 6000.0)
+                self._add_star(image, 55, 35, 5000.0)
+                path = Path(folder) / f"bjd_{index:02d}.fits"
+                header = wcs.to_header()
+                header["DATE-OBS"] = f"2026-09-01T20:{index:02d}:00"
+                header["EXPTIME"] = 60.0
+                header["SITELAT"] = 39.9334
+                header["SITELONG"] = 32.8597
+                header["SITEELEV"] = 900.0
+                fits.PrimaryHDU(image, header=header).writeto(path)
+                files.append(str(path))
+
+            results = []
+            worker = ExoplanetWorker(files, (30, 40), [(55, 35)], aperture_radius=5.0)
+            worker.result_ready.connect(results.append)
+            worker.run()
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].time_system, "BJD_TDB")
+            self.assertNotIn("time_standard_jd_utc", results[0].quality_flags)
 
     def test_streaming_worker_blocks_a_saturated_target(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -140,6 +201,27 @@ class ExoplanetTests(unittest.TestCase):
         )
 
         self.assertFalse(result.transit_candidate)
+
+    def test_oot_detrending_preserves_transit_depth_with_linear_airmass_like_trend(self):
+        count = 60
+        times = np.asarray([2460000.0 + index / 1440.0 for index in range(count)])
+        trend = np.linspace(0.995, 1.005, count)
+        transit = np.ones(count)
+        transit[22:38] = 0.99
+        comparison = np.full(count, 10000.0)
+        target = comparison * trend * transit
+
+        result = differential_light_curve_from_fluxes(
+            times,
+            target,
+            comparison,
+            target_uncertainties=np.full(count, 5.0),
+            comparison_uncertainties=np.full(count, 5.0),
+            detrend_order=1,
+        )
+
+        self.assertTrue(result.transit_candidate)
+        self.assertAlmostEqual(result.depth, 0.01, delta=0.0015)
 
     def test_aperture_measurement_recenters_star(self):
         yy, xx = np.indices((70, 70), dtype=np.float32)

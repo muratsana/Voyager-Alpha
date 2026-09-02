@@ -25,11 +25,11 @@ bilinen obje eşleşmesi olmayan aday üretildiğini söyler; keşif onayı değ
 
 1. En az beş zaman damgalı FITS karesi
 2. Görüntü üzerinden hedef yıldız ve bir veya daha fazla karşılaştırma yıldızı
-3. ASTAP referans çözümü, affine WCS propagation ve zayıf kayıtta kare bazlı ASTAP fallback
-4. İsteğe bağlı bias/dark/flat kalibrasyonu ve alt piksel kare hizalama
-5. Kare bazında yıldız merkezleme, annulus arka planı ve nokta belirsizliği
+3. ASTAP referans çözümü ve sensör koordinatına ters affine konum aktarımı
+4. İsteğe bağlı bias/dark/flat kalibrasyonu; fotometri kalibre edilmiş fakat yeniden örneklenmemiş sensör karesinde
+5. Kare bazında yıldız merkezleme, annulus arka planı ve FITS kamera verisine dayalı nokta belirsizliği
 6. Kararlılığa göre ağırlıklandırılmış çoklu karşılaştırma yıldızı ensemble'ı
-7. Robust sabit/doğrusal/ikinci derece detrending ve tek-transit box araması
+7. Ön taramayla bulunan geçiş penceresini dışarıda bırakan robust detrending ve tek-transit box araması
 8. `exoplanet-core` ile quadratic limb-darkened fiziksel transit uyumu
 9. Derinlik belirsizliği, SNR, süre, merkez zamanı, `Rp/R*`, impact parameter ve ΔBIC raporu
 
@@ -45,8 +45,9 @@ kümesini yerel SQLite cache'e atomik olarak günceller:
 
 Seçili hedef WCS ile RA/Dec'e çevrilir ve beş yaydakika içindeki katalog kayıtları
 `VERIFIED`, `CANDIDATE`, `UNVERIFIED` veya `FALSE POSITIVE` olarak gösterilir. Katalog
-ephemeris'i BJD, mevcut fotometri zamanı JD_UTC olduğundan transit pencere karşılaştırması
-yaklaşık sonuç olarak etiketlenir. Güncelleme hatasında son başarılı kaynak verisi silinmez.
+ephemeris'i BJD'dir. WCS ile FITS gözlemevi konumu bulunduğunda poz orta zamanları
+`BJD_TDB` standardına çevrilir; bu bilgiler eksikse sonuç `JD_UTC` olarak açık kalite
+uyarısıyla korunur. Güncelleme hatasında son başarılı kaynak verisi silinmez.
 
 Transit kararı da aday sınıflandırmasıdır. Airmass, değişken karşılaştırma yıldızı,
 meridyen geçişi, bulut ve zaman doğruluğu gibi sistematikler ayrıca incelenmelidir.
@@ -106,3 +107,6 @@ MPC/ADES gönderimi veya yeni asteroid/ötegezegen iddiası için uygulama çık
 başına yeterli değildir. Astrometrik artıklar, doğru gözlemevi kodu, zaman sistemi,
 fotometrik sistematikler, katalog sorguları ve bağımsız tekrar gözlemleri uzman
 kontrolünden geçmelidir. ADES çıktısı bu nedenle taslak olarak işaretlenir.
+
+Paket incelemesine göre tamamlanan, kısmi kalan ve planlanan bilimsel işler için
+[`docs/SCIENTIFIC_REVISION_STATUS.md`](docs/SCIENTIFIC_REVISION_STATUS.md) belgesine bakın.

@@ -312,7 +312,7 @@ class ExoplanetCatalog:
 def default_catalog_path() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     root = Path(local) if local else Path.home() / ".voyager-alpha"
-    return root / "Astrohub" / "SkySearch" / "catalogs" / "exoplanets.sqlite3"
+    return root / "Astrohub" / "VoyagerAlpha" / "catalogs" / "exoplanets.sqlite3"
 
 
 def predict_nearest_transit(

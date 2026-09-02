@@ -121,6 +121,31 @@ class TrackletTests(unittest.TestCase):
 
         self.assertEqual(tracklets, [])
 
+    def test_links_slow_motion_when_pixel_scale_is_known(self):
+        frames = [frame(index) for index in range(5)]
+        detections = {
+            index: [detection(index, 10.0 + index * 0.4, 20.0)]
+            for index in range(5)
+        }
+
+        tracklets = link_tracklets(detections, frames, pixel_scale_arcsec=1.0)
+
+        self.assertEqual(len(tracklets), 1)
+        self.assertEqual(tracklets[0].tracklet_id, "VA-00001")
+        self.assertAlmostEqual(tracklets[0].motion_arcsec_per_min, 0.4, places=1)
+
+    def test_rejects_missing_or_non_monotonic_times(self):
+        missing = [frame(index) for index in range(3)]
+        missing[1].midpoint_jd = None
+        duplicate = [frame(index) for index in range(3)]
+        duplicate[2].midpoint_jd = duplicate[1].midpoint_jd
+        detections = {index: [detection(index, 10 + index * 2, 20)] for index in range(3)}
+
+        with self.assertRaisesRegex(ValueError, "valid exposure midpoint"):
+            link_tracklets(detections, missing, pixel_scale_arcsec=1.0)
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            link_tracklets(detections, duplicate, pixel_scale_arcsec=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
