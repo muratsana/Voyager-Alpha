@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!--
+    Astrohub favicon — src/components/shell/LogoMark.tsx ile BİREBİR aynı
+    geometri. Daha önce burada bambaşka bir çizim (levha çerçevesi + yıldız)
+    duruyordu; sekme çubuğundaki işaret ile sitedeki işaret aynı marka
+    değildi. Bu dosya değişirse `node scripts/generate-icons.mjs` yeniden
+    çalıştırılmalı — PNG ikonların tek kaynağı burasıdır.
+
+    Zemin dolu: hem koyu hem açık sekme çubuğunda aynı okunur.
+    Halka nötr gri, yıldız kehribar — iki ton 16 pikselde birbirinden
+    ayrılıyor, tek ton kullanıldığında işaret gri bir lekeye dönüşüyordu.
+  -->
+  <rect width="32" height="32" rx="6" fill="#07090b"/>
+  <circle cx="16" cy="16" r="11" fill="none" stroke="#c8d0d8"
+          stroke-width="2.4" stroke-linecap="round"
+          stroke-dasharray="25.55 9" transform="rotate(-66.6 16 16)"/>
+  <path d="M16 2 C16.7 11.2 17.6 15.3 26 16 C17.6 16.7 16.7 20.8 16 30 C15.3 20.8 14.4 16.7 6 16 C14.4 15.3 15.3 11.2 16 2 Z"
+        fill="#ff9d2e"/>
+</svg>
